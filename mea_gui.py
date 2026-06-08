@@ -26,38 +26,54 @@ except ImportError as e:
     sys.exit(1)
 
 
-# ── Palette ────────────────────────────────────────────────────────────────────
-CLR_BG           = "#1e1e2e"   # main window background
-CLR_PANEL        = "#2a2a3e"   # left electrode panel
-CLR_TOOLBAR      = "#16162a"   # top / bottom bars
-CLR_BTN          = "#45475a"   # idle button / electrode cell fill
-CLR_BTN_HOVER    = "#585b70"   # hover (not wired yet, available)
-CLR_BTN_ACTIVE   = "#89b4fa"   # selected electrode fill  (bright blue)
-CLR_TEXT         = "#000000"   # primary text  (light lavender — readable on dark)
-CLR_TEXT_ON_ACTIVE = "#1e1e2e" # text printed ON a bright active button
-CLR_SUBTEXT      = "#a6adc8"   # secondary / dim text
-CLR_ACCENT       = "#89b4fa"   # accent (matches active electrode)
-CLR_PLOT_BG      = "#ffffff"   # matplotlib axes background
+# ── Palette (gray scale) ───────────────────────────────────────────────────────
+CLR_BG              = "#2b2b2b"   # main window background
+CLR_PANEL           = "#333333"   # left electrode panel
+CLR_TOOLBAR         = "#1f1f1f"   # top / bottom bars
+CLR_BTN             = "#4a4a4a"   # idle button / electrode cell fill
+CLR_BTN_HOVER       = "#5c5c5c"   # hover
+CLR_BTN_ACTIVE      = "#888888"   # fallback selected electrode (overridden by ch color)
+CLR_TEXT            = "#e0e0e0"   # primary text
+CLR_TEXT_ON_ACTIVE  = "#ffffff"   # text on active/accent button
+CLR_TEXT_ON_BTN     = "#505050"   # dark gray text on buttons
+CLR_SUBTEXT         = "#888888"   # secondary / dim text
+CLR_ACCENT          = "#aaaaaa"   # accent
+CLR_PLOT_BG         = "#ffffff"   # matplotlib axes background
 
 # Range-slider colours
-CLR_TRACK        = "#313244"   # unselected track
-CLR_RANGE        = "#585b70"   # filled range between handles
-CLR_HANDLE       = "#89b4fa"   # drag handle circles
-CLR_HANDLE_GRAB  = "#b4befe"   # handle while dragging
+CLR_TRACK           = "#3e3e3e"   # unselected track
+CLR_RANGE           = "#606060"   # filled range between handles
+CLR_HANDLE          = "#aaaaaa"   # handle bar colour (idle)
+CLR_HANDLE_GRAB     = "#dddddd"   # handle bar while dragging
 
 FONT_UI   = ("Helvetica", 10)
 FONT_MONO = ("Courier", 9)
 FONT_TINY = ("Helvetica", 8)
 
 DEBOUNCE_MS  = 600   # ms after handle release before auto-replot
-GRID_CELL_PX = 8    # electrode cell size (px)
+GRID_CELL_PX = 8     # electrode cell size (px)
 GRID_PAD_PX  = 2     # gap between cells
+
+
+# ── tab20 hex colours (matches mea_plot render_traces) ────────────────────────
+_CMAP = plt.get_cmap("tab20")
+TAB20_HEX = [
+    "#{:02x}{:02x}{:02x}".format(
+        int(r * 255), int(g * 255), int(b * 255)
+    )
+    for r, g, b, _ in [_CMAP(i) for i in range(20)]
+]
+
+def _ch_color(plot_position_index):
+    """Return hex colour for the i-th plotted channel (wraps at 20)."""
+    return TAB20_HEX[plot_position_index % 20]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 class RangeSlider(tk.Canvas):
     """
     A dual-handle range slider drawn on a Canvas.
+    Handles are rendered as vertical bars instead of circles.
 
     Attributes (read from outside)
     --------------------------------
@@ -69,10 +85,11 @@ class RangeSlider(tk.Canvas):
     command(start, end) is called whenever either handle moves.
     """
 
-    _PAD   = 16   # horizontal padding so handles don't clip at edges
-    _H     = 36   # canvas height
-    _TH    =  4   # track half-height
-    _HR    =  8   # handle radius
+    _PAD  = 16   # horizontal padding so handles don't clip at edges
+    _H    = 36   # canvas height
+    _TH   =  4   # track half-height
+    _BW   =  2   # bar half-width  (pixels each side of centre)
+    _BH   = 10   # bar half-height (pixels each side of centre)
 
     def __init__(self, master, from_=0, to=100, command=None, **kw):
         kw.setdefault("bg", CLR_TOOLBAR)
@@ -88,10 +105,11 @@ class RangeSlider(tk.Canvas):
         self.start_var = tk.IntVar(value=from_)
         self.end_var   = tk.IntVar(value=to)
 
-        self._track   = self.create_rectangle(0, 0, 0, 0, fill=CLR_TRACK,   outline="")
-        self._range   = self.create_rectangle(0, 0, 0, 0, fill=CLR_RANGE,   outline="")
-        self._h_start = self.create_oval(0, 0, 0, 0,      fill=CLR_HANDLE,  outline="")
-        self._h_end   = self.create_oval(0, 0, 0, 0,      fill=CLR_HANDLE,  outline="")
+        self._track   = self.create_rectangle(0, 0, 0, 0, fill=CLR_TRACK,  outline="")
+        self._range   = self.create_rectangle(0, 0, 0, 0, fill=CLR_RANGE,  outline="")
+        # Vertical bar handles
+        self._h_start = self.create_rectangle(0, 0, 0, 0, fill=CLR_HANDLE, outline="")
+        self._h_end   = self.create_rectangle(0, 0, 0, 0, fill=CLR_HANDLE, outline="")
         self._lbl_s   = self.create_text(0, 0, fill=CLR_TEXT, font=FONT_TINY, anchor="n")
         self._lbl_e   = self.create_text(0, 0, fill=CLR_TEXT, font=FONT_TINY, anchor="n")
 
@@ -127,7 +145,8 @@ class RangeSlider(tk.Canvas):
         w  = self.winfo_width() or 400
         cy = self._H // 2
         th = self._TH
-        hr = self._HR
+        bw = self._BW
+        bh = self._BH
 
         xs = self._val_to_x(self.start_var.get())
         xe = self._val_to_x(self.end_var.get())
@@ -136,12 +155,12 @@ class RangeSlider(tk.Canvas):
         self.coords(self._track, self._PAD, cy - th, w - self._PAD, cy + th)
         # Filled range
         self.coords(self._range, xs, cy - th, xe, cy + th)
-        # Handles
-        self.coords(self._h_start, xs - hr, cy - hr, xs + hr, cy + hr)
-        self.coords(self._h_end,   xe - hr, cy - hr, xe + hr, cy + hr)
+        # Vertical bar handles
+        self.coords(self._h_start, xs - bw, cy - bh, xs + bw, cy + bh)
+        self.coords(self._h_end,   xe - bw, cy - bh, xe + bw, cy + bh)
         # Labels
-        self.coords(self._lbl_s, xs, cy + hr + 1)
-        self.coords(self._lbl_e, xe, cy + hr + 1)
+        self.coords(self._lbl_s, xs, cy + bh + 1)
+        self.coords(self._lbl_e, xe, cy + bh + 1)
         self.itemconfig(self._lbl_s, text=str(self.start_var.get()))
         self.itemconfig(self._lbl_e, text=str(self.end_var.get()))
 
@@ -193,9 +212,9 @@ class MEAApp:
         # ── Application state ──────────────────────────────────────────────
         self.filepath     = None
         self.meta         = None
-        self.selected_chs = set()
-        self._cell_rects  = {}    # flat_idx -> canvas rect id
-        self._grid_items  = {}    # rect id  -> flat_idx
+        self.selected_chs = set()   # set of flat_idx
+        self._cell_rects  = {}      # flat_idx -> canvas rect id
+        self._grid_items  = {}      # rect id  -> flat_idx
         self._debounce_id = None
 
         # ── Build UI ───────────────────────────────────────────────────────
@@ -258,7 +277,7 @@ class MEAApp:
         vsb.pack(side=tk.RIGHT,  fill=tk.Y)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
         self.grid_canvas.pack(fill=tk.BOTH, expand=True)
-        self.grid_canvas.bind("<Button-1>",  self._on_grid_click)
+        self.grid_canvas.bind("<Button-1>",   self._on_grid_click)
         self.grid_canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.grid_canvas.bind("<Button-4>",   self._on_mousewheel)
         self.grid_canvas.bind("<Button-5>",   self._on_mousewheel)
@@ -284,39 +303,24 @@ class MEAApp:
 
         self._style_axes()
         self.root.after(50, self._draw_placeholder)
-    
 
     def _on_span_select(self, xmin, xmax):
         if self.meta is None:
             return
 
-        # Ensure left-to-right ordering
         xmin, xmax = sorted((xmin, xmax))
-
-        sr = self.meta["sampling_rate"]
-
-        # x-axis is currently in seconds
+        sr    = self.meta["sampling_rate"]
         start = int(xmin * sr)
         end   = int(xmax * sr)
-
-        # Clamp
         start = max(0, start)
         end   = min(self.meta["n_frames"], end)
-
-        # Prevent zero-width window
         if end <= start:
             return
 
-        # Update slider
         self.range_slider.start_var.set(start)
         self.range_slider.end_var.set(end)
-
         self.range_slider._redraw()
-
-        # Update text label
         self._update_window_label(start, end)
-
-        # Optional auto replot
         self._do_plot()
 
     # ── Bottom bar (dual-handle range slider) ──────────────────────────────────
@@ -325,21 +329,17 @@ class MEAApp:
         bar = tk.Frame(self.root, bg=CLR_TOOLBAR, pady=4)
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # Window info label (left side)
         self.lbl_window = tk.Label(bar, text="", fg=CLR_SUBTEXT, bg=CLR_TOOLBAR, font=FONT_TINY)
         self.lbl_window.pack(side=tk.LEFT, padx=(10, 6))
 
-        # Plot button (right side — pack before slider so it anchors right)
         _btn(bar, "Plot", self._do_plot, accent=True).pack(side=tk.RIGHT, padx=(6, 10))
 
-        # Dual-handle range slider fills the middle
         self.range_slider = RangeSlider(
             bar, from_=0, to=1000, command=self._on_range_change,
         )
         self.range_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=4)
 
     def _on_range_change(self, start, end):
-        """Called continuously while dragging."""
         self._update_window_label(start, end)
         if self._debounce_id is not None:
             self.root.after_cancel(self._debounce_id)
@@ -384,7 +384,6 @@ class MEAApp:
         dur = f"{meta['n_frames'] / sr:.1f} s" if sr else f"{meta['n_frames']:,} frames"
         self.lbl_meta.config(text=f"{meta['n_channels']} ch  |  {dur}  |  {meta['layout']}")
 
-        # Update range slider bounds; default window = first 3000 frames (or all)
         nf          = meta["n_frames"]
         default_end = min(nf, 3000)
         self.range_slider.set_range(0, nf, start=0, end=default_end)
@@ -411,7 +410,7 @@ class MEAApp:
         self._grid_items.clear()
 
         for flat_idx, (r, c) in enumerate(zip(rows, cols)):
-            r_plot = rmax - r          # flip: row 0 at bottom
+            r_plot = rmax - r
             x0 = pad + c * step
             y0 = pad + r_plot * step
             rect = self.grid_canvas.create_rectangle(
@@ -441,13 +440,32 @@ class MEAApp:
             self.grid_canvas.itemconfig(self._cell_rects[flat_idx], fill=CLR_BTN)
         else:
             self.selected_chs.add(flat_idx)
-            self.grid_canvas.itemconfig(self._cell_rects[flat_idx], fill=CLR_BTN_ACTIVE)
+            # Colour will be assigned properly on the next _refresh_grid_colors call
+            self._refresh_grid_colors()
         self._update_sel_label()
 
-    def _select_all(self):
+        if self.selected_chs and self.meta is not None:
+            if self._debounce_id is not None:
+                self.root.after_cancel(self._debounce_id)
+            self._debounce_id = self.root.after(150, self._do_plot)  # short debounce for smoothness
+
+    def _refresh_grid_colors(self):
+        """Re-color all electrode cells to match their plot position in tab20."""
+        # Build a sorted list so position 0 = first plotted channel
+        ordered = sorted(self.selected_chs)
+        pos_map = {flat_idx: i for i, flat_idx in enumerate(ordered)}
+
         for flat_idx, rect in self._cell_rects.items():
+            if flat_idx in pos_map:
+                color = _ch_color(pos_map[flat_idx])
+                self.grid_canvas.itemconfig(rect, fill=color)
+            else:
+                self.grid_canvas.itemconfig(rect, fill=CLR_BTN)
+
+    def _select_all(self):
+        for flat_idx in self._cell_rects:
             self.selected_chs.add(flat_idx)
-            self.grid_canvas.itemconfig(rect, fill=CLR_BTN_ACTIVE)
+        self._refresh_grid_colors()
         self._update_sel_label()
 
     def _select_none(self):
@@ -506,20 +524,22 @@ class MEAApp:
         self.ax.set_title(
             f"{len(channels)} channel(s)  |  {traces.shape[0]:,} samples  |  "
             f"{Path(self.filepath).name}",
-            fontsize=8, color=CLR_TEXT,
+            fontsize=8, color="#333333",
         )
         self.fig.tight_layout()
         self.mpl_canvas.draw()
 
+        # Keep grid colors in sync after every plot
+        self._refresh_grid_colors()
+
     def _style_axes(self):
-        """Apply dark theme to axes (safe to call after cla())."""
         self.fig.patch.set_facecolor(CLR_PLOT_BG)
         self.ax.set_facecolor(CLR_PLOT_BG)
-        self.ax.tick_params(colors=CLR_TEXT)
-        self.ax.xaxis.label.set_color(CLR_TEXT)
-        self.ax.yaxis.label.set_color(CLR_TEXT)
+        self.ax.tick_params(colors="#333333")
+        self.ax.xaxis.label.set_color("#333333")
+        self.ax.yaxis.label.set_color("#333333")
         for spine in self.ax.spines.values():
-            spine.set_edgecolor(CLR_SUBTEXT)
+            spine.set_edgecolor("#aaaaaa")
 
     def _draw_placeholder(self):
         self.ax.cla()
@@ -527,11 +547,10 @@ class MEAApp:
         self.ax.text(
             0.5, 0.5, "Select electrodes and press Plot",
             ha="center", va="center", transform=self.ax.transAxes,
-            color=CLR_SUBTEXT, fontsize=11,
+            color="#aaaaaa", fontsize=11,
         )
         self.ax.set_xticks([])
         self.ax.set_yticks([])
-        # self.fig.tight_layout()
         self.mpl_canvas.draw()
 
     # ── Save ───────────────────────────────────────────────────────────────────
@@ -551,15 +570,23 @@ class MEAApp:
 # ── Shared button factory ──────────────────────────────────────────────────────
 
 def _btn(parent, text, cmd, tiny=False, accent=False):
-    """Consistent button styling in one place."""
+    bg_color = CLR_ACCENT if accent else CLR_BTN
     return tk.Button(
-        parent, text=text, command=cmd, relief=tk.FLAT,
+        parent,
+        text=text,
+        command=cmd,
+        relief=tk.FLAT,
+        bd=0,                    # remove border
+        highlightthickness=0,    # remove focus ring / lighter box
+        highlightbackground=CLR_TOOLBAR,
+        highlightcolor=CLR_TOOLBAR,
         font=FONT_TINY if tiny else FONT_UI,
-        bg=CLR_ACCENT if accent else CLR_BTN,
-        fg=CLR_TEXT_ON_ACTIVE if accent else CLR_TEXT,
+        bg=bg_color,
+        fg=CLR_TEXT_ON_BTN,      # always white text on buttons
         activebackground=CLR_BTN_HOVER,
-        activeforeground=CLR_TEXT,
+        activeforeground=CLR_TEXT_ON_BTN,
         padx=8 if not tiny else 4,
+        pady=2,
     )
 
 
