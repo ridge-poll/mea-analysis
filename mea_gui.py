@@ -251,7 +251,7 @@ class MEAApp:
         pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         # Left: electrode panel
-        left = tk.Frame(pane, bg=CLR_PANEL, width=360)
+        left = tk.Frame(pane, bg=CLR_PANEL, width=450)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(6, 3), pady=6)
         left.pack_propagate(False)
 
