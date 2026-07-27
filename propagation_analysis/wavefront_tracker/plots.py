@@ -179,7 +179,7 @@ def save_basic_plots(
     fig, ax = plt.subplots(figsize=(6, 5))
     activation_map(positions, activation_times, ax=ax, title="Recruitment times")
     fig.tight_layout()
-    fig.savefig(f"{output_prefix}_recruitment_times_map.png", dpi=dpi)
+    # fig.savefig(f"{output_prefix}_recruitment_times_map.png", dpi=dpi)
     fig.savefig(f"{output_prefix}_activation_map.png", dpi=dpi)
     plt.close(fig)
 

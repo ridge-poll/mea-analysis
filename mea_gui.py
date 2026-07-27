@@ -8,6 +8,7 @@ Run:  python mea_gui.py [optional_recording.brw]
 
 import sys
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog, messagebox
 from pathlib import Path
 
@@ -39,6 +40,7 @@ CLR_TEXT_ON_BTN     = "#505050"   # dark gray text on buttons
 CLR_SUBTEXT         = "#888888"   # secondary / dim text
 CLR_ACCENT          = "#aaaaaa"   # accent
 CLR_PLOT_BG         = "#ffffff"   # matplotlib axes background
+CLR_EVENT           = "#d62728"   # marked-event shading (red, distinct from tab20)
 
 # Range-slider colours
 CLR_TRACK           = "#3e3e3e"   # unselected track
@@ -217,6 +219,11 @@ class MEAApp:
         self._grid_items  = {}      # rect id  -> flat_idx
         self._debounce_id = None
 
+        # ── Event-marking state ──────────────────────────────────────────────
+        self.marking_events  = False   # True while waiting for a mark-event drag
+        self.events           = []     # list of (start, stop) in x-axis units
+        self._event_patches   = []     # axvspan artists, parallel to self.events
+
         # ── Build UI ───────────────────────────────────────────────────────
         self._build_toolbar()
         self._build_main_area()
@@ -243,6 +250,7 @@ class MEAApp:
         self.lbl_meta.pack(side=tk.RIGHT, padx=8)
 
         _btn(bar, "Save figure…", self._save_figure).pack(side=tk.RIGHT, padx=(4, 8))
+        _btn(bar, "Save events…", self._save_events).pack(side=tk.RIGHT, padx=(4, 4))
 
     # ── Main area ──────────────────────────────────────────────────────────────
 
@@ -309,6 +317,13 @@ class MEAApp:
             return
 
         xmin, xmax = sorted((xmin, xmax))
+
+        # ── Mark-event mode: record the span instead of zooming ────────────
+        if self.marking_events:
+            self._add_event(xmin, xmax)
+            self._set_mark_mode(False)   # auto-disable after one drag
+            return
+
         sr    = self.meta["sampling_rate"]
         start = int(xmin * sr)
         end   = int(xmax * sr)
@@ -323,7 +338,7 @@ class MEAApp:
         self._update_window_label(start, end)
         self._do_plot()
 
-    # ── Bottom bar (dual-handle range slider) ──────────────────────────────────
+    # ── Bottom bar (dual-handle range slider + event controls) ─────────────────
 
     def _build_bottom_bar(self):
         bar = tk.Frame(self.root, bg=CLR_TOOLBAR, pady=4)
@@ -333,6 +348,20 @@ class MEAApp:
         self.lbl_window.pack(side=tk.LEFT, padx=(10, 6))
 
         _btn(bar, "Plot", self._do_plot, accent=True).pack(side=tk.RIGHT, padx=(6, 10))
+
+        event_frame = tk.Frame(bar, bg=CLR_TOOLBAR)
+        event_frame.pack(side=tk.RIGHT, padx=(6, 4))
+
+        self.btn_mark = _btn(event_frame, "Mark Event", self._toggle_mark_mode)
+        self.btn_mark.pack(side=tk.LEFT, padx=2)
+
+        _btn(event_frame, "Undo", self._undo_event, tiny=True).pack(side=tk.LEFT, padx=2)
+        _btn(event_frame, "Clear", self._clear_events, tiny=True).pack(side=tk.LEFT, padx=2)
+
+        self.lbl_events = tk.Label(
+            event_frame, text="0 events", fg=CLR_SUBTEXT, bg=CLR_TOOLBAR, font=FONT_TINY
+        )
+        self.lbl_events.pack(side=tk.LEFT, padx=(6, 2))
 
         self.range_slider = RangeSlider(
             bar, from_=0, to=1000, command=self._on_range_change,
@@ -358,6 +387,92 @@ class MEAApp:
         else:
             self.lbl_window.config(text=f"samples {start:,} – {end:,}")
 
+    # ── Event marking ────────────────────────────────────────────────────────
+
+    def _toggle_mark_mode(self):
+        self._set_mark_mode(not self.marking_events)
+
+    def _set_mark_mode(self, on):
+        self.marking_events = on
+        if on:
+            self.btn_mark.config(bg=CLR_ACCENT, fg=CLR_TEXT_ON_ACTIVE, activebackground=CLR_ACCENT)
+        else:
+            self.btn_mark.config(bg=CLR_BTN, fg=CLR_TEXT_ON_BTN, activebackground=CLR_BTN_HOVER)
+
+    def _add_event(self, xmin, xmax):
+        if xmax <= xmin:
+            return
+        self.events.append((round(xmin, 2), round(xmax, 2)))
+        current_xlim = self.ax.get_xlim()
+        patch = self.ax.axvspan(xmin, xmax, color=CLR_EVENT, alpha=0.2, zorder=0)
+        self._event_patches.append(patch)
+        self.ax.set_xlim(*current_xlim)
+        self._update_events_label()
+        self.mpl_canvas.draw()
+
+    def _undo_event(self):
+        if not self.events:
+            return
+        self.events.pop()
+        patch = self._event_patches.pop()
+        patch.remove()
+        self._update_events_label()
+        self.mpl_canvas.draw()
+
+    def _clear_events(self):
+        if not self.events:
+            return
+        for patch in self._event_patches:
+            patch.remove()
+        self.events.clear()
+        self._event_patches.clear()
+        self._update_events_label()
+        self.mpl_canvas.draw()
+
+    def _update_events_label(self):
+        n = len(self.events)
+        self.lbl_events.config(text=f"{n} event{'s' if n != 1 else ''}")
+
+    def _redraw_event_patches(self, xlim=None):
+        """
+        Re-draw shaded event spans after the axes were cleared (ax.cla()).
+
+        axvspan() feeds its x-extent into Matplotlib's autoscale, so a marked
+        event that lies outside the currently plotted window would otherwise
+        stretch the x-axis out to include it (huge blank gap + squashed
+        traces). Passing the real plotted x-range in `xlim` re-clamps the
+        view afterwards; events outside that range are simply clipped from
+        view, not stretched to.
+        """
+        self._event_patches = []
+        for start, stop in self.events:
+            patch = self.ax.axvspan(start, stop, color=CLR_EVENT, alpha=0.2, zorder=0)
+            self._event_patches.append(patch)
+        if xlim is not None:
+            self.ax.set_xlim(*xlim)
+
+    def _save_events(self):
+        if not self.events:
+            messagebox.showinfo("No events", "No events have been marked yet.")
+            return
+        folder = filedialog.askdirectory(title="Choose folder to save events CSV")
+        if not folder:
+            return
+
+        stem      = Path(self.filepath).stem if self.filepath else "events"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path      = Path(folder) / f"{stem}_events_{timestamp}.csv"
+
+        try:
+            with open(path, "w") as f:
+                f.write("start_time_s,end_time_s\n")
+                for start, stop in self.events:
+                    f.write(f"{start:.2f},{stop:.2f}\n")
+        except Exception as e:
+            messagebox.showerror("Save error", str(e))
+            return
+        print(f"Saved → {path}")
+
     # ── File loading ───────────────────────────────────────────────────────────
 
     def _pick_file(self):
@@ -378,6 +493,10 @@ class MEAApp:
         self.filepath     = path
         self.meta         = meta
         self.selected_chs = set()
+
+        # New recording → old events (and their axis units) no longer apply.
+        self._clear_events()
+        self._set_mark_mode(False)
 
         self.lbl_file.config(text=Path(path).name, fg=CLR_TEXT)
         sr  = meta["sampling_rate"]
@@ -526,6 +645,10 @@ class MEAApp:
             f"{Path(self.filepath).name}",
             fontsize=8, color="#333333",
         )
+        # render_traces() calls ax.cla(), which wipes any marked-event shading —
+        # redraw it so the spans persist across re-plots. Clamp xlim to the
+        # window actually plotted so off-screen events don't stretch the view.
+        self._redraw_event_patches(xlim=(x[0], x[-1]))
         self.fig.tight_layout()
         self.mpl_canvas.draw()
 
@@ -551,6 +674,7 @@ class MEAApp:
         )
         self.ax.set_xticks([])
         self.ax.set_yticks([])
+        self._redraw_event_patches()
         self.mpl_canvas.draw()
 
     # ── Save ───────────────────────────────────────────────────────────────────
