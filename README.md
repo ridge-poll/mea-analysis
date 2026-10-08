@@ -36,6 +36,34 @@ Or with a recording
 python mea_gui.py recording.brw
 ```
 
+## MEA Heatmap
+
+`mea_heatmap.py` provides an interactive spatial view of activity across the MEA. Each electrode is shown at its physical location, with color representing its instantaneous voltage.
+
+![Heatmap](docs/heatmap_demo.png)
+*Animated spatial reconstruction of MEA activity across the electrode array.*
+
+### Features
+
+- Spatial electrode activity map
+- Interactive time slider
+- Play/pause controls
+- Jump between detected spike events
+- Automatic noisy-channel rejection
+- Optional baseline correction
+
+### Dependencies
+
+```bash
+pip install numpy scipy matplotlib h5py
+```
+
+Run:
+
+```bash
+python mea_heatmap.py
+```
+
 
 ## 3D Surface Plot
 
