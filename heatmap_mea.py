@@ -26,8 +26,8 @@ from mea_io import open_recording, load_traces
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════════
 
-START_SAMPLE = 3943470
-END_SAMPLE =   3965051      # None = whole file
+START_SAMPLE = 0
+END_SAMPLE =   20000      # None = whole file
 
 CMAP = 'coolwarm'
 MARKER_SIZE = 40
