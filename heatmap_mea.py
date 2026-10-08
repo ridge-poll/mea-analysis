@@ -16,7 +16,6 @@ import tkinter as tk
 from tkinter import filedialog
 
 import numpy as np
-from scipy.signal import iirnotch, filtfilt
 from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
@@ -27,8 +26,8 @@ from mea_io import open_recording, load_traces
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════════
 
-START_SAMPLE = 0
-END_SAMPLE = 100000            # None = whole file
+START_SAMPLE = 3943470
+END_SAMPLE =   3965051      # None = whole file
 
 CMAP = 'coolwarm'
 MARKER_SIZE = 40
@@ -37,12 +36,10 @@ EDGE_PADDING = 1.0            # margin around the electrode layout, data units
 OUTLIER_MAD_THRESH = 5
 OUTLIER_NEIGHBOR_K = 6
 
-APPLY_NOTCH_FILTER = True
-NOTCH_FREQ_HZ = 60            # use 50 outside 60 Hz-mains regions
-NOTCH_Q = 30
+BASELINE_CORRECT = True   # subtract each channel's own mean before plotting/analysis
 
 PLAYBACK_STEP_SAMPLES = 10
-PLAYBACK_FPS = 30
+PLAYBACK_FPS = 60
 ARROW_KEY_STEP_SAMPLES = 1
 
 SPIKE_STD_THRESHOLD = 7.0
@@ -51,16 +48,6 @@ SPIKE_FILL_GAP_SAMPLES = 2
 # ══════════════════════════════════════════════════════════════════════════
 # SIGNAL / CLEANING HELPERS
 # ══════════════════════════════════════════════════════════════════════════
-
-def apply_notch_filter(traces, fs, f0, q):
-    if f0 <= 0 or f0 >= fs / 2:
-        print(f'  Notch frequency {f0} Hz is outside the valid range for '
-              f'fs={fs} Hz — skipping.')
-        return traces
-    w0 = f0 / (fs / 2)
-    b, a = iirnotch(w0, w0 / q)
-    return filtfilt(b, a, traces, axis=0)
-
 
 def reject_outliers(traces, ex, ey, mad_thresh, n_neighbors):
     ch_var = traces.var(axis=0)
@@ -164,11 +151,21 @@ def main():
     print(f'  {n_channels} channels  |  {traces.shape[0]} samples  |  '
           f'layout: {meta["layout"]}')
 
-    if APPLY_NOTCH_FILTER:
-        print(f'  Applying {NOTCH_FREQ_HZ} Hz notch filter (Q={NOTCH_Q}) ...')
-        traces = apply_notch_filter(traces, sampling_rate, NOTCH_FREQ_HZ, NOTCH_Q)
-
     traces = reject_outliers(traces, ex, ey, OUTLIER_MAD_THRESH, OUTLIER_NEIGHBOR_K)
+
+    # ── Diagnostic: is the stripe pattern a static per-channel baseline offset? ──
+    ch_means = traces.mean(axis=0)
+    ch_fluctuation = traces.std(axis=0).mean()  # avg within-channel signal wiggle
+    print(f'  Per-channel baseline range: {ch_means.min():.1f} to {ch_means.max():.1f} '
+          f'(spread std {ch_means.std():.1f})')
+    print(f'  Avg within-channel fluctuation (std over time): {ch_fluctuation:.1f}')
+    if ch_means.std() > ch_fluctuation:
+        print('  -> Baseline differences across channels are LARGER than the signal '
+              'fluctuations themselves.\n     This alone can produce a static, '
+              'geometric-looking spatial pattern that has nothing to do with decoding.')
+
+    if BASELINE_CORRECT:
+        traces = traces - ch_means  # center every channel on its own baseline
 
     spike_samples = detect_spike_events(
         traces,
@@ -202,10 +199,6 @@ def main():
     # ── Controls: slider is the primary control, Play is optional ──────────
     ax_slider = plt.axes([0.18, 0.08, 0.62, 0.04])
     slider = Slider(ax_slider, 'Sample', 0, n_samples - 1, valinit=0, valstep=1)
-
-    # ax_play = plt.axes([0.82, 0.075, 0.10, 0.05])
-    # ax_prev = plt.axes([0.02, 0.075, 0.10, 0.05])
-    # ax_next = plt.axes([0.13, 0.075, 0.10, 0.05])
 
     ax_play = plt.axes([0.84, 0.025, 0.08, 0.035])
     ax_prev = plt.axes([0.04, 0.025, 0.12, 0.035])
@@ -277,7 +270,7 @@ def main():
             if state['timer'] is not None:
                 state['timer'].stop()   # fully stopped -> pause is instant
         fig.canvas.draw_idle()
-    
+
     def next_spike(_event):
         if len(spike_samples) == 0:
             return

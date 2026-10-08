@@ -135,6 +135,66 @@ def load_traces(filepath, channel_indices, start, end):
     return traces.astype(np.float64)
 
 
+def load_raster_events(filepath, start, end, n_std=5.0, min_duration_ms=1.0,
+                       max_window_s=50.0, block_bytes=8 * 1024 * 1024):
+    """All sustained absolute crossings, in fixed Row/Col order.
+
+    Center and threshold each channel using median and MAD from the first
+    0.5 seconds of the displayed window. Stream bounded time blocks and keep
+    run state across blocks. Returns absolute seconds and physical row ranks.
+    """
+    meta = open_recording(filepath)
+    sr = meta["sampling_rate"]
+    if sr is None or not np.isfinite(sr) or sr <= 0:
+        raise ValueError("Raster mode requires a known positive sampling rate.")
+    if not (0 <= start < end <= meta["n_frames"]):
+        raise ValueError("Invalid raster sample window.")
+    if end - start > max_window_s * sr + 1e-9:
+        raise ValueError("Raster windows must be 50 seconds or shorter.")
+    if not np.isfinite(n_std) or n_std <= 0:
+        raise ValueError("Raster threshold must be positive.")
+    if not np.isfinite(min_duration_ms) or min_duration_ms <= 0:
+        raise ValueError("Raster minimum duration must be positive.")
+    chs = meta["chs"]
+    order = np.lexsort((chs["Col"], chs["Row"]))
+    ranks = np.empty(order.size, dtype=int)
+    ranks[order] = np.arange(order.size)
+    n_ch = meta["n_channels"]
+    # Budget includes float workspace, masks, and raw data.
+    block_frames = max(1, block_bytes // max(32 * n_ch, 1))
+    min_samples = max(1, int(np.ceil(min_duration_ms * sr / 1000)))
+    runs = np.zeros(n_ch, dtype=np.int64)
+    onsets = np.zeros(n_ch, dtype=np.int64)
+    times, rows = [], []
+    with h5py.File(filepath, "r") as f:
+        dset = f[DATASET_PATH]
+        def read_block(a, b):
+            if dset.ndim == 2:
+                return dset[a:b, :].astype(float)
+            return dset[a*n_ch:b*n_ch].reshape(b-a, n_ch).astype(float)
+        # Bound baseline allocation separately to about 8 MiB.
+        baseline_end = min(end, start + max(1, min(int(0.5*sr), block_frames)))
+        baseline = read_block(start, baseline_end)
+        center = np.median(baseline, axis=0)
+        noise = 1.4826 * np.median(np.abs(baseline-center), axis=0)
+        # Quantized/constant baselines need a nonzero noise floor.
+        noise = np.maximum(noise, np.finfo(float).eps * np.maximum(1, np.abs(center)))
+        threshold = n_std * noise
+        del baseline
+        for a in range(start, end, block_frames):
+            signal = read_block(a, min(a+block_frames, end))
+            active = np.abs(signal-center) > threshold
+            for offset, mask in enumerate(active):
+                new = mask & (runs == 0)
+                onsets[new] = a + offset
+                runs = np.where(mask, runs+1, 0)
+                qualified = np.flatnonzero(runs == min_samples)
+                if qualified.size:
+                    times.extend((onsets[qualified] / sr).tolist())
+                    rows.extend(ranks[qualified].tolist())
+    return np.asarray(times), np.asarray(rows, dtype=int), order
+
+
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _require(f, path, filepath):

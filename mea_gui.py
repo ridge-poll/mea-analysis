@@ -53,6 +53,7 @@ FONT_MONO = ("Courier", 9)
 FONT_TINY = ("Helvetica", 8)
 
 DEBOUNCE_MS  = 600   # ms after handle release before auto-replot
+RASTER_MAX_S = 50.0
 GRID_CELL_PX = 8     # electrode cell size (px)
 GRID_PAD_PX  = 2     # gap between cells
 
@@ -212,6 +213,8 @@ class MEAApp:
         self.root.minsize(960, 600)
 
         # ── Application state ──────────────────────────────────────────────
+        self.raster_mode = False
+        self._accepted_window = None
         self.filepath     = None
         self.meta         = None
         self.selected_chs = set()   # set of flat_idx
@@ -248,6 +251,16 @@ class MEAApp:
 
         self.lbl_meta = tk.Label(bar, text="", fg=CLR_SUBTEXT, bg=CLR_TOOLBAR, font=FONT_TINY)
         self.lbl_meta.pack(side=tk.RIGHT, padx=8)
+
+        self.btn_view = _btn(bar, "Raster view", self._toggle_view)
+        self.btn_view.pack(side=tk.RIGHT, padx=4)
+        self.raster_threshold = tk.StringVar(value="5")
+        self.raster_duration = tk.StringVar(value="1")
+        for label, variable in (("Raster MAD ×", self.raster_threshold),
+                                ("Min ms", self.raster_duration)):
+            tk.Label(bar, text=label, bg=CLR_TOOLBAR, fg=CLR_TEXT,
+                     font=FONT_TINY).pack(side=tk.LEFT, padx=2)
+            tk.Entry(bar, textvariable=variable, width=4).pack(side=tk.LEFT, padx=2)
 
         _btn(bar, "Save figure…", self._save_figure).pack(side=tk.RIGHT, padx=(4, 8))
         _btn(bar, "Save events…", self._save_events).pack(side=tk.RIGHT, padx=(4, 4))
@@ -332,6 +345,9 @@ class MEAApp:
         if end <= start:
             return
 
+        if not self._validate_window(start, end):
+            return
+        self._accepted_window = (start, end)
         self.range_slider.start_var.set(start)
         self.range_slider.end_var.set(end)
         self.range_slider._redraw()
@@ -369,10 +385,83 @@ class MEAApp:
         self.range_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=4)
 
     def _on_range_change(self, start, end):
+        if not self._validate_window(start, end):
+            if self._accepted_window is not None:
+                old_start, old_end = self._accepted_window
+                self.range_slider.set_range(0, self.meta["n_frames"], old_start, old_end)
+                self._update_window_label(old_start, old_end)
+                self.range_slider._drag = None
+            return
+        self._accepted_window = (start, end)
         self._update_window_label(start, end)
         if self._debounce_id is not None:
             self.root.after_cancel(self._debounce_id)
         self._debounce_id = self.root.after(DEBOUNCE_MS, self._do_plot)
+
+    def _validate_window(self, start, end):
+        if not self.raster_mode:
+            return True
+        sr = self.meta["sampling_rate"] if self.meta else None
+        if sr is None or not np.isfinite(sr) or sr <= 0:
+            messagebox.showerror("Raster unavailable", "Raster mode requires a known sampling rate.")
+            return False
+        if end - start > RASTER_MAX_S * sr + 1e-9:
+            messagebox.showerror("Raster window limit",
+                                 "Raster mode supports windows of 50 seconds or shorter. "
+                                 "Shorten the window or switch to Trace view. "
+                                 "Marked export events are unaffected.")
+            return False
+        return True
+
+    def _toggle_view(self):
+        if self.meta is None:
+            messagebox.showinfo("No file", "Please open a recording file first.")
+            return
+        previous = self.raster_mode
+        self.raster_mode = not previous
+        start = self.range_slider.start_var.get()
+        end = self.range_slider.end_var.get()
+        if not self._validate_window(start, end):
+            self.raster_mode = previous
+            return
+        self._accepted_window = (start, end)
+        self.btn_view.config(text="Trace view" if self.raster_mode else "Raster view")
+        if self._debounce_id is not None:
+            self.root.after_cancel(self._debounce_id)
+            self._debounce_id = None
+        self._do_plot()
+
+    def _plot_raster(self, start, end):
+        try:
+            n_std = float(self.raster_threshold.get())
+            duration = float(self.raster_duration.get())
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+            times, rows, order = mea_io.load_raster_events(
+                self.filepath, start, end, n_std=n_std, min_duration_ms=duration)
+        except Exception as exc:
+            messagebox.showerror("Raster error", str(exc))
+            return
+        finally:
+            self.root.config(cursor="")
+        self.ax.cla()
+        self.ax.scatter(times, rows, marker="|", s=6, linewidths=0.4,
+                        color="black", rasterized=True)
+        self.ax.set_ylim(len(order)-0.5, -0.5)
+        ticks = np.unique(np.linspace(0, len(order)-1, min(12, len(order))).astype(int))
+        chs = self.meta["chs"]
+        self.ax.set_yticks(ticks)
+        self.ax.set_yticklabels([f"{i}: ({chs['Row'][order[i]]}, {chs['Col'][order[i]]})"
+                                 for i in ticks], fontsize=7)
+        self.ax.set_ylabel("Fixed electrode order: rank (Row, Col)")
+        self.ax.set_xlabel("Time (s)")
+        self.ax.set_title(f"All {len(order)} electrodes | {len(times):,} crossings | "
+                          f"MAD × {n_std:g}, ≥ {duration:g} ms", fontsize=8)
+        self._style_axes()
+        sr = self.meta["sampling_rate"]
+        self._redraw_event_patches(xlim=(start/sr, end/sr))
+        self.fig.tight_layout()
+        self.mpl_canvas.draw()
 
     def _update_window_label(self, start=None, end=None):
         if start is None:
@@ -490,6 +579,11 @@ class MEAApp:
             messagebox.showerror("Load error", str(e))
             return
 
+        self.raster_mode = False
+        self.btn_view.config(text="Raster view")
+        if self._debounce_id is not None:
+            self.root.after_cancel(self._debounce_id)
+            self._debounce_id = None
         self.filepath     = path
         self.meta         = meta
         self.selected_chs = set()
@@ -506,6 +600,7 @@ class MEAApp:
         nf          = meta["n_frames"]
         default_end = min(nf, 3000)
         self.range_slider.set_range(0, nf, start=0, end=default_end)
+        self._accepted_window = (0, default_end)
         self._update_window_label(0, default_end)
 
         self._build_grid(meta)
@@ -563,7 +658,7 @@ class MEAApp:
             self._refresh_grid_colors()
         self._update_sel_label()
 
-        if self.selected_chs and self.meta is not None:
+        if self.selected_chs and self.meta is not None and not self.raster_mode:
             if self._debounce_id is not None:
                 self.root.after_cancel(self._debounce_id)
             self._debounce_id = self.root.after(150, self._do_plot)  # short debounce for smoothness
@@ -613,6 +708,13 @@ class MEAApp:
             messagebox.showinfo("No file", "Please open a recording file first.")
             return
 
+        start = self.range_slider.start_var.get()
+        end = self.range_slider.end_var.get()
+        if not self._validate_window(start, end):
+            return
+        if self.raster_mode:
+            self._plot_raster(start, end)
+            return
         channels = sorted(self.selected_chs)
         if not channels:
             messagebox.showinfo("No channels", "Toggle at least one electrode in the grid.")
